@@ -1,4 +1,4 @@
-name: Build Ycash Android Node
+name: Build, Sign and Verify Ycash Android Node
 
 on:
   workflow_dispatch:
@@ -14,8 +14,8 @@ env:
   ANDROID_NDK: "27.2.12479018"
   RUST_TARGET: "aarch64-linux-android"
 
-  # Temporary CI signing values.
-  # These are ONLY for debug/testing APKs.
+  # Temporary CI signing.
+  # A new debug keystore is generated for each workflow run.
   CI_KEYSTORE: "${{ github.workspace }}/ci-debug.keystore"
   CI_KEY_ALIAS: "ycash-debug"
   CI_KEYSTORE_PASSWORD: "ycash-debug-password"
@@ -23,36 +23,216 @@ env:
 
 jobs:
   build:
-    name: Build, Sign and Verify Ycash Android Node
-    runs-on: ubuntu-22.04
+    name: Build, Align, Sign and Verify Ycash Android Node
+    runs-on: ubuntu-24.04
 
     steps:
 
-      # ---------------------------------------------------------
-      # 1. Checkout
-      # ---------------------------------------------------------
+      # =========================================================
+      # 1. CHECKOUT
+      # =========================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ---------------------------------------------------------
-      # 2. Java 17
-      # ---------------------------------------------------------
+      # =========================================================
+      # 2. PREPARE PROJECT ROOT
+      #
+      # Supports either:
+      #
+      # A) Project already extracted at repository root:
+      #
+      #    Cargo.toml
+      #    crates/
+      #    android-app/
+      #
+      # OR
+      #
+      # B) Repository contains the project ZIP.
+      #
+      # The ZIP is extracted into the GitHub workspace.
+      # =========================================================
+      - name: Prepare project root
+        shell: bash
+        run: |
+          set -e
+
+          echo "Current repository:"
+          pwd
+
+          echo
+          echo "Repository contents:"
+          ls -la
+
+          # -----------------------------------------------------
+          # Already at root?
+          # -----------------------------------------------------
+          if [ -f "Cargo.toml" ]; then
+            echo
+            echo "Cargo.toml already exists at repository root."
+            echo "Using existing project."
+
+          else
+            echo
+            echo "Cargo.toml not found at root."
+            echo "Searching for Ycash project ZIP..."
+
+            ZIP=""
+
+            # Preferred filename
+            if [ -f "Ycash-Android-Node-Rust-FIXED-v0.12-GITHUB-ROOT.zip" ]; then
+              ZIP="Ycash-Android-Node-Rust-FIXED-v0.12-GITHUB-ROOT.zip"
+            fi
+
+            # Previous filename
+            if [ -z "$ZIP" ] && [ -f "Ycash-Android-Node-Rust-FIXED-v0.12.zip" ]; then
+              ZIP="Ycash-Android-Node-Rust-FIXED-v0.12.zip"
+            fi
+
+            # Generic search
+            if [ -z "$ZIP" ]; then
+              ZIP="$(
+                find . \
+                  -maxdepth 3 \
+                  -type f \
+                  -iname '*ycash*android*node*.zip' \
+                  | head -n 1 || true
+              )"
+            fi
+
+            if [ -z "$ZIP" ]; then
+              echo
+              echo "ERROR: Could not find Cargo.toml."
+              echo "ERROR: Could not find a Ycash Android Node ZIP."
+              echo
+              echo "Repository files:"
+              find . -maxdepth 4 -type f | sort
+              exit 1
+            fi
+
+            echo
+            echo "Found:"
+            echo "$ZIP"
+
+            rm -rf .ycash-project
+            mkdir -p .ycash-project
+
+            echo
+            echo "Extracting project..."
+            unzip -q "$ZIP" -d .ycash-project
+
+            # ---------------------------------------------------
+            # Check if ZIP was already flattened.
+            # ---------------------------------------------------
+            if [ -f ".ycash-project/Cargo.toml" ]; then
+
+              echo "ZIP contains project at its root."
+
+              cp -a .ycash-project/. .
+
+            else
+
+              # -------------------------------------------------
+              # Find nested Cargo.toml.
+              # -------------------------------------------------
+              NESTED_CARGO="$(
+                find .ycash-project \
+                  -type f \
+                  -name Cargo.toml \
+                  | head -n 1 || true
+              )"
+
+              if [ -z "$NESTED_CARGO" ]; then
+                echo
+                echo "ERROR: Extracted ZIP contains no Cargo.toml."
+                echo
+                echo "Extracted files:"
+                find .ycash-project -maxdepth 6 -type f | sort
+                exit 1
+              fi
+
+              PROJECT_ROOT="$(dirname "$NESTED_CARGO")"
+
+              echo
+              echo "Nested project detected:"
+              echo "$PROJECT_ROOT"
+
+              cp -a "$PROJECT_ROOT"/. .
+            fi
+
+            rm -rf .ycash-project
+          fi
+
+          # =====================================================
+          # Verify project root
+          # =====================================================
+
+          echo
+          echo "=========================================="
+          echo "FINAL PROJECT ROOT"
+          echo "=========================================="
+
+          pwd
+
+          echo
+          echo "Root contents:"
+          ls -la
+
+          echo
+          echo "Checking required files..."
+
+          test -f Cargo.toml
+          test -d crates
+          test -d android-app
+
+          echo
+          echo "Cargo.toml:"
+          ls -lh Cargo.toml
+
+          echo
+          echo "Project directories:"
+
+          for dir in \
+            crates \
+            android-app \
+            cpp \
+            tests \
+            tools \
+            .github
+          do
+            if [ -d "$dir" ]; then
+              echo "  OK: $dir/"
+            else
+              echo "  NOTE: $dir/ not present"
+            fi
+          done
+
+          echo
+          echo "Project root preparation complete."
+
+      # =========================================================
+      # 3. JAVA 17
+      # =========================================================
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      # ---------------------------------------------------------
-      # 3. Android SDK
-      # ---------------------------------------------------------
+      # =========================================================
+      # 4. ANDROID SDK
+      # =========================================================
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
+      # =========================================================
+      # 5. ANDROID PLATFORM + NDK
+      # =========================================================
       - name: Install Android SDK and NDK
         shell: bash
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
+          set -e
+
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
 
           sdkmanager \
             "platform-tools" \
@@ -60,47 +240,80 @@ jobs:
             "build-tools;35.0.0" \
             "ndk;${ANDROID_NDK}"
 
-      # ---------------------------------------------------------
-      # 4. Rust
-      # ---------------------------------------------------------
+          echo
+          echo "Android SDK installed."
+
+      # =========================================================
+      # 6. RUST
+      # =========================================================
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ env.RUST_TARGET }}
 
-      # ---------------------------------------------------------
-      # 5. Configure Android linker
-      # ---------------------------------------------------------
+      # =========================================================
+      # 7. CONFIGURE ANDROID RUST LINKER
+      # =========================================================
       - name: Configure Android Rust linker
         shell: bash
         run: |
+          set -e
+
           NDK="$ANDROID_HOME/ndk/${ANDROID_NDK}"
-          CLANG="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          LLVM="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
-          echo "ANDROID_NDK=$NDK"
-          echo "CLANG=$CLANG"
+          echo "NDK:"
+          echo "$NDK"
 
-          test -x "$CLANG/aarch64-linux-android35-clang"
+          echo
+          echo "LLVM:"
+          echo "$LLVM"
+
+          test -x "$LLVM/aarch64-linux-android35-clang"
+          test -x "$LLVM/llvm-ar"
 
           mkdir -p .cargo
 
           cat > .cargo/config.toml <<EOF
           [target.aarch64-linux-android]
-          linker = "$CLANG/aarch64-linux-android35-clang"
-          ar = "$CLANG/llvm-ar"
+          linker = "$LLVM/aarch64-linux-android35-clang"
+          ar = "$LLVM/llvm-ar"
           EOF
 
-      # ---------------------------------------------------------
-      # 6. Verify Rust workspace
-      # ---------------------------------------------------------
+          echo
+          echo "Cargo Android linker configuration:"
+          cat .cargo/config.toml
+
+      # =========================================================
+      # 8. VERIFY RUST WORKSPACE
+      # =========================================================
       - name: Verify Rust workspace
         shell: bash
         run: |
-          cargo metadata --format-version 1 --no-deps
+          set -e
 
-      # ---------------------------------------------------------
-      # 7. Cache Cargo
-      # ---------------------------------------------------------
+          echo "Rust version:"
+          rustc --version
+
+          echo
+          echo "Cargo version:"
+          cargo --version
+
+          echo
+          echo "Checking Cargo workspace..."
+
+          test -f Cargo.toml
+
+          cargo metadata \
+            --format-version 1 \
+            --no-deps
+
+          echo
+          echo "Cargo workspace verified."
+
+      # =========================================================
+      # 9. CARGO CACHE
+      # =========================================================
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
@@ -113,44 +326,56 @@ jobs:
             ycash-${{ runner.os }}-${{ env.RUST_TARGET }}-
             ycash-${{ runner.os }}-
 
-      # ---------------------------------------------------------
-      # 8. Build Rust node
-      # ---------------------------------------------------------
+      # =========================================================
+      # 10. BUILD RUST ANDROID NODE
+      # =========================================================
       - name: Build Ycash ARM64 Android node
         shell: bash
         run: |
+          set -e
+
           cargo build \
             --release \
             --target "${RUST_TARGET}" \
             -p ycash-android-node
 
-      # ---------------------------------------------------------
-      # 9. Verify ARM64 executable
-      # ---------------------------------------------------------
+      # =========================================================
+      # 11. VERIFY ARM64 NODE
+      # =========================================================
       - name: Verify ARM64 node binary
         shell: bash
         run: |
+          set -e
+
           NODE="target/${RUST_TARGET}/release/ycash-android-node"
 
           test -f "$NODE"
           test -x "$NODE"
 
           echo "Node binary:"
+          ls -lh "$NODE"
+
+          echo
+          echo "File type:"
           file "$NODE"
 
+          echo
           echo "ELF information:"
           readelf -h "$NODE" | grep -E \
             "Class:|Machine:|Type:"
 
-          echo "Required shared libraries:"
+          echo
+          echo "Native dependencies:"
           readelf -d "$NODE" | grep NEEDED || true
 
-      # ---------------------------------------------------------
-      # 10. Put exact node binary into APK assets
-      # ---------------------------------------------------------
-      - name: Package Rust node into Android app
+      # =========================================================
+      # 12. BUNDLE EXACT RUST NODE INTO APK ASSETS
+      # =========================================================
+      - name: Bundle Rust node into Android app
         shell: bash
         run: |
+          set -e
+
           NODE="target/${RUST_TARGET}/release/ycash-android-node"
           ASSETS="android-app/app/src/main/assets"
 
@@ -162,15 +387,113 @@ jobs:
 
           chmod 755 "$ASSETS/ycash-android-node"
 
+          test -f "$ASSETS/ycash-android-node"
+
           echo "Bundled node:"
           ls -lh "$ASSETS/ycash-android-node"
 
-      # ---------------------------------------------------------
-      # 11. Generate temporary CI signing keystore
-      # ---------------------------------------------------------
-      - name: Generate temporary debug signing keystore
+      # =========================================================
+      # 13. VERIFY ANDROID PROJECT
+      # =========================================================
+      - name: Verify Android project
         shell: bash
         run: |
+          set -e
+
+          test -f android-app/settings.gradle
+          test -f android-app/app/build.gradle
+          test -f android-app/app/src/main/AndroidManifest.xml
+          test -f android-app/app/src/main/assets/ycash-android-node
+
+          echo "Android project verified."
+
+      # =========================================================
+      # 14. GRADLE
+      # =========================================================
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      # =========================================================
+      # 15. BUILD APK
+      #
+      # IMPORTANT:
+      #
+      # Gradle/AGP is the ONLY APK packager.
+      #
+      # We do NOT:
+      #
+      # unzip APK
+      # modify APK
+      # zip APK again
+      #
+      # This prevents libc++_shared.so from being lost.
+      # =========================================================
+      - name: Build Android APK with Gradle
+        working-directory: android-app
+        shell: bash
+        run: |
+          set -e
+
+          gradle \
+            --no-daemon \
+            --stacktrace \
+            assembleDebug
+
+      # =========================================================
+      # 16. LOCATE GRADLE APK
+      # =========================================================
+      - name: Locate Gradle APK
+        id: locate_apk
+        shell: bash
+        run: |
+          set -e
+
+          APK="android-app/app/build/outputs/apk/debug/app-debug.apk"
+
+          test -f "$APK"
+
+          echo "apk=$APK" >> "$GITHUB_OUTPUT"
+
+          echo "Gradle APK:"
+          ls -lh "$APK"
+
+      # =========================================================
+      # 17. VERIFY NATIVE LIBRARIES BEFORE ALIGNMENT
+      # =========================================================
+      - name: Verify native libraries in Gradle APK
+        shell: bash
+        run: |
+          set -e
+
+          APK="${{ steps.locate_apk.outputs.apk }}"
+
+          echo "Checking native libraries..."
+
+          unzip -l "$APK" | grep \
+            "lib/arm64-v8a/libycashd.so"
+
+          unzip -l "$APK" | grep \
+            "lib/arm64-v8a/libc++_shared.so"
+
+          echo
+          echo "Checking bundled Rust node..."
+
+          unzip -l "$APK" | grep \
+            "assets/ycash-android-node"
+
+          echo
+          echo "All required native files are present."
+
+      # =========================================================
+      # 18. GENERATE TEMPORARY DEBUG KEY
+      # =========================================================
+      - name: Generate temporary debug signing key
+        shell: bash
+        run: |
+          set -e
+
           rm -f "$CI_KEYSTORE"
 
           keytool \
@@ -183,57 +506,83 @@ jobs:
             -keyalg RSA \
             -keysize 2048 \
             -validity 1 \
-            -dname "CN=Ycash CI Debug, OU=Development, O=Ycash, L=CI, ST=CI, C=GB"
+            -dname \
+              "CN=Ycash CI Debug, OU=Development, O=Ycash, L=CI, ST=CI, C=GB"
 
           test -f "$CI_KEYSTORE"
 
-          echo "Temporary signing keystore generated."
+          echo
+          echo "Temporary CI signing key generated."
 
-      # ---------------------------------------------------------
-      # 12. Build Android APK
-      # ---------------------------------------------------------
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.9"
-
-      - name: Build unsigned/debug APK
-        working-directory: android-app
+      # =========================================================
+      # 19. ZIPALIGN
+      #
+      # Operates directly on the complete Gradle APK.
+      # No manual APK reconstruction.
+      # =========================================================
+      - name: Zipalign APK
         shell: bash
         run: |
-          gradle \
-            --no-daemon \
-            --stacktrace \
-            assembleDebug
+          set -e
 
-      # ---------------------------------------------------------
-      # 13. Locate APK
-      # ---------------------------------------------------------
-      - name: Locate APK
-        id: apk
+          INPUT="android-app/app/build/outputs/apk/debug/app-debug.apk"
+          ALIGNED="android-app/app/build/outputs/apk/debug/ycash-android-node-aligned.apk"
+
+          ZIPALIGN="$ANDROID_HOME/build-tools/35.0.0/zipalign"
+
+          test -x "$ZIPALIGN"
+          test -f "$INPUT"
+
+          rm -f "$ALIGNED"
+
+          "$ZIPALIGN" \
+            -f \
+            -p \
+            4 \
+            "$INPUT" \
+            "$ALIGNED"
+
+          test -f "$ALIGNED"
+
+          echo "Aligned APK:"
+          ls -lh "$ALIGNED"
+
+      # =========================================================
+      # 20. VERIFY ZIPALIGN
+      # =========================================================
+      - name: Verify zip alignment
         shell: bash
         run: |
-          APK="android-app/app/build/outputs/apk/debug/app-debug.apk"
+          set -e
 
-          test -f "$APK"
+          ALIGNED="android-app/app/build/outputs/apk/debug/ycash-android-node-aligned.apk"
 
-          echo "apk=$APK" >> "$GITHUB_OUTPUT"
+          ZIPALIGN="$ANDROID_HOME/build-tools/35.0.0/zipalign"
 
-          ls -lh "$APK"
+          "$ZIPALIGN" \
+            -c \
+            -P 4 \
+            -v \
+            "$ALIGNED"
 
-      # ---------------------------------------------------------
-      # 14. Sign APK with temporary CI key
-      # ---------------------------------------------------------
-      - name: Sign APK
+      # =========================================================
+      # 21. SIGN ALIGNED APK
+      # =========================================================
+      - name: Sign aligned APK
         shell: bash
         run: |
-          APK="${{ steps.apk.outputs.apk }}"
+          set -e
+
+          ALIGNED="android-app/app/build/outputs/apk/debug/ycash-android-node-aligned.apk"
+
           SIGNED="android-app/app/build/outputs/apk/debug/ycash-android-node-debug-signed.apk"
 
           APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
 
           test -x "$APKSIGNER"
-          test -f "$APK"
+          test -f "$ALIGNED"
+
+          rm -f "$SIGNED"
 
           "$APKSIGNER" sign \
             --ks "$CI_KEYSTORE" \
@@ -241,55 +590,86 @@ jobs:
             --ks-pass "pass:$CI_KEYSTORE_PASSWORD" \
             --key-pass "pass:$CI_KEY_PASSWORD" \
             --out "$SIGNED" \
-            "$APK"
+            "$ALIGNED"
 
           test -f "$SIGNED"
 
+          echo
           echo "Signed APK:"
           ls -lh "$SIGNED"
 
-      # ---------------------------------------------------------
-      # 15. Verify APK signature
-      # ---------------------------------------------------------
+      # =========================================================
+      # 22. VERIFY APK SIGNATURE
+      # =========================================================
       - name: Verify APK signature
         shell: bash
         run: |
+          set -e
+
           SIGNED="android-app/app/build/outputs/apk/debug/ycash-android-node-debug-signed.apk"
+
           APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
 
           "$APKSIGNER" verify \
             --verbose \
             "$SIGNED"
 
-      # ---------------------------------------------------------
-      # 16. Verify node is inside signed APK
-      # ---------------------------------------------------------
-      - name: Verify bundled Ycash node
+          echo
+          echo "APK signature verification passed."
+
+      # =========================================================
+      # 23. VERIFY FINAL APK CONTENTS
+      # =========================================================
+      - name: Verify final signed APK contents
         shell: bash
         run: |
+          set -e
+
           SIGNED="android-app/app/build/outputs/apk/debug/ycash-android-node-debug-signed.apk"
 
+          echo "Checking final APK..."
+
+          echo
+          echo "Ycash native library:"
+          unzip -l "$SIGNED" | grep \
+            "lib/arm64-v8a/libycashd.so"
+
+          echo
+          echo "C++ runtime:"
+          unzip -l "$SIGNED" | grep \
+            "lib/arm64-v8a/libc++_shared.so"
+
+          echo
+          echo "Rust node:"
           unzip -l "$SIGNED" | grep \
             "assets/ycash-android-node"
 
-          echo "Ycash ARM64 node confirmed inside APK."
+          echo
+          echo "Final APK contents verified."
 
-      # ---------------------------------------------------------
-      # 17. Verify APK package
-      # ---------------------------------------------------------
-      - name: Verify final APK
+      # =========================================================
+      # 24. FINAL APK INFORMATION
+      # =========================================================
+      - name: Display final APK information
         shell: bash
         run: |
+          set -e
+
           SIGNED="android-app/app/build/outputs/apk/debug/ycash-android-node-debug-signed.apk"
 
-          test -f "$SIGNED"
+          echo "=========================================="
+          echo "FINAL APK"
+          echo "=========================================="
 
-          echo "Final APK:"
           ls -lh "$SIGNED"
 
-      # ---------------------------------------------------------
-      # 18. Upload signed APK
-      # ---------------------------------------------------------
+          echo
+          echo "SHA-256:"
+          sha256sum "$SIGNED"
+
+      # =========================================================
+      # 25. UPLOAD SIGNED APK
+      # =========================================================
       - name: Upload signed debug APK
         uses: actions/upload-artifact@v4
         with:
@@ -297,21 +677,23 @@ jobs:
           path: android-app/app/build/outputs/apk/debug/ycash-android-node-debug-signed.apk
           if-no-files-found: error
 
-      # ---------------------------------------------------------
-      # 19. Upload raw ARM64 node
-      # ---------------------------------------------------------
-      - name: Upload ARM64 node binary
+      # =========================================================
+      # 26. UPLOAD RAW ARM64 NODE
+      # =========================================================
+      - name: Upload ARM64 node
         uses: actions/upload-artifact@v4
         with:
           name: ycash-android-node-arm64
           path: target/${{ env.RUST_TARGET }}/release/ycash-android-node
           if-no-files-found: error
 
-      # ---------------------------------------------------------
-      # 20. Cleanup temporary signing key
-      # ---------------------------------------------------------
-      - name: Remove temporary signing keystore
+      # =========================================================
+      # 27. CLEAN TEMPORARY SIGNING KEY
+      # =========================================================
+      - name: Remove temporary signing key
         if: always()
         shell: bash
         run: |
           rm -f "$CI_KEYSTORE"
+
+          echo "Temporary signing key removed."
