@@ -370,6 +370,12 @@ jobs:
 
       # =========================================================
       # 12. BUNDLE EXACT RUST NODE INTO APK ASSETS
+      #
+      # The Rust node ships as a standalone ELF executable that
+      # NodeService.java copies out of assets and launches with
+      # ProcessBuilder — it is not a JNI shared library, so it is
+      # never placed under jniLibs/ and never produces a
+      # lib/<abi>/*.so entry in the APK.
       # =========================================================
       - name: Bundle Rust node into Android app
         shell: bash
@@ -427,8 +433,6 @@ jobs:
       # unzip APK
       # modify APK
       # zip APK again
-      #
-      # This prevents libc++_shared.so from being lost.
       # =========================================================
       - name: Build Android APK with Gradle
         working-directory: android-app
@@ -460,7 +464,14 @@ jobs:
           ls -lh "$APK"
 
       # =========================================================
-      # 17. VERIFY NATIVE LIBRARIES BEFORE ALIGNMENT
+      # 17. VERIFY BUNDLED RUST NODE BEFORE ALIGNMENT
+      #
+      # This app has no JNI shared library — the Rust node is a
+      # standalone executable shipped as an asset and launched
+      # via ProcessBuilder (see NodeService.java). There is no
+      # lib/arm64-v8a/libycashd.so and no libc++_shared.so to
+      # check for; asserting on them made this step fail even
+      # though the APK was built correctly.
       # =========================================================
       - name: Verify native libraries in Gradle APK
         shell: bash
@@ -469,22 +480,13 @@ jobs:
 
           APK="${{ steps.locate_apk.outputs.apk }}"
 
-          echo "Checking native libraries..."
-
-          unzip -l "$APK" | grep \
-            "lib/arm64-v8a/libycashd.so"
-
-          unzip -l "$APK" | grep \
-            "lib/arm64-v8a/libc++_shared.so"
-
-          echo
           echo "Checking bundled Rust node..."
 
           unzip -l "$APK" | grep \
             "assets/ycash-android-node"
 
           echo
-          echo "All required native files are present."
+          echo "Required bundled files are present."
 
       # =========================================================
       # 18. GENERATE TEMPORARY DEBUG KEY
@@ -619,6 +621,9 @@ jobs:
 
       # =========================================================
       # 23. VERIFY FINAL APK CONTENTS
+      #
+      # Same correction as step 17: no JNI shared library exists
+      # in this app, so only the bundled asset is checked.
       # =========================================================
       - name: Verify final signed APK contents
         shell: bash
@@ -628,16 +633,6 @@ jobs:
           SIGNED="android-app/app/build/outputs/apk/debug/ycash-android-node-debug-signed.apk"
 
           echo "Checking final APK..."
-
-          echo
-          echo "Ycash native library:"
-          unzip -l "$SIGNED" | grep \
-            "lib/arm64-v8a/libycashd.so"
-
-          echo
-          echo "C++ runtime:"
-          unzip -l "$SIGNED" | grep \
-            "lib/arm64-v8a/libc++_shared.so"
 
           echo
           echo "Rust node:"
