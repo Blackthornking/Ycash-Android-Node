@@ -551,6 +551,14 @@ jobs:
 
       # =========================================================
       # 20. VERIFY ZIPALIGN
+      #
+      # Check mode requires the same mandatory <align> positional
+      # argument as the align step above (4), passed via -p/align
+      # rather than -P <pagesize_kb>. The previous invocation
+      # used "-P 4" and never supplied <align> at all, so
+      # zipalign couldn't parse its arguments and exited with the
+      # usage banner (exit code 2) instead of actually checking
+      # anything.
       # =========================================================
       - name: Verify zip alignment
         shell: bash
@@ -563,8 +571,9 @@ jobs:
 
           "$ZIPALIGN" \
             -c \
-            -P 4 \
+            -p \
             -v \
+            4 \
             "$ALIGNED"
 
       # =========================================================
