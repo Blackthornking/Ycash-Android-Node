@@ -1,0 +1,302 @@
+name: Build Ycash Android Node
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+env:
+  ANDROID_API: "35"
+  ANDROID_NDK: "27.2.12479018"
+  RUST_TARGET: "aarch64-linux-android"
+
+jobs:
+  prepare:
+    name: Find and Extract Project ZIP
+    runs-on: ubuntu-24.04
+
+    outputs:
+      project_root: ${{ steps.detect.outputs.project_root }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Find ZIP
+        id: find_zip
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP_FILE="$(find . -maxdepth 3 -type f \
+            \( -iname '*.zip' \) \
+            -not -path './.git/*' \
+            | head -n 1)"
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "::error::No project ZIP file found."
+            exit 1
+          fi
+
+          echo "Found ZIP: $ZIP_FILE"
+          echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
+
+      - name: Extract ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf extracted
+          mkdir -p extracted
+
+          unzip -q "$ZIP_FILE" -d extracted
+
+          echo "Extracted project:"
+          find extracted -maxdepth 3 -type f | head -100
+
+      - name: Detect project root
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ROOT="extracted"
+
+          # If the ZIP contains one top-level directory, use it.
+          dirs=($(find extracted -mindepth 1 -maxdepth 1 -type d))
+
+          if [ "${#dirs[@]}" -eq 1 ]; then
+            ROOT="${dirs[0]}"
+          fi
+
+          echo "Project root: $ROOT"
+          echo "project_root=$ROOT" >> "$GITHUB_OUTPUT"
+
+          echo "Project contents:"
+          find "$ROOT" -maxdepth 2 -type f | sort | head -150
+
+      - name: Upload extracted project
+        uses: actions/upload-artifact@v4
+        with:
+          name: extracted-ycash-node-project
+          path: extracted/
+
+  rust-build:
+    name: Rust Build and Tests
+    runs-on: ubuntu-24.04
+    needs: prepare
+
+    steps:
+      - name: Download extracted project
+        uses: actions/download-artifact@v4
+        with:
+          name: extracted-ycash-node-project
+          path: extracted
+
+      - name: Detect project root
+        id: root
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ROOT="extracted"
+          dirs=($(find extracted -mindepth 1 -maxdepth 1 -type d))
+
+          if [ "${#dirs[@]}" -eq 1 ]; then
+            ROOT="${dirs[0]}"
+          fi
+
+          echo "ROOT=$ROOT" >> "$GITHUB_ENV"
+          echo "Using: $ROOT"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-${ANDROID_API}" \
+            "ndk;${ANDROID_NDK}"
+
+      - name: Configure Android linker
+        shell: bash
+        run: |
+          NDK="$ANDROID_SDK_ROOT/ndk/$ANDROID_NDK"
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          echo "$TOOLCHAIN" >> "$GITHUB_PATH"
+
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TOOLCHAIN/aarch64-linux-android${ANDROID_API}-clang" >> "$GITHUB_ENV"
+
+      - name: Show Rust project
+        working-directory: ${{ env.ROOT }}
+        run: |
+          pwd
+          ls -la
+          find . -maxdepth 2 -name Cargo.toml -o -name Cargo.lock
+
+      - name: Cargo check
+        working-directory: ${{ env.ROOT }}
+        run: |
+          cargo check --workspace
+
+      - name: Run Rust tests
+        working-directory: ${{ env.ROOT }}
+        run: |
+          cargo test --workspace --all-targets
+
+      - name: Android ARM64 check
+        working-directory: ${{ env.ROOT }}
+        run: |
+          cargo check \
+            --workspace \
+            --target "${RUST_TARGET}"
+
+      - name: Android ARM64 release build
+        working-directory: ${{ env.ROOT }}
+        run: |
+          cargo build \
+            --workspace \
+            --release \
+            --target "${RUST_TARGET}"
+
+      - name: Upload Rust build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ycash-node-rust-arm64
+          path: |
+            extracted/**/target/aarch64-linux-android/release/*
+
+  android-build:
+    name: Build Android APK
+    runs-on: ubuntu-24.04
+    needs: prepare
+
+    steps:
+      - name: Download extracted project
+        uses: actions/download-artifact@v4
+        with:
+          name: extracted-ycash-node-project
+          path: extracted
+
+      - name: Detect project root
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ROOT="extracted"
+          dirs=($(find extracted -mindepth 1 -maxdepth 1 -type d))
+
+          if [ "${#dirs[@]}" -eq 1 ]; then
+            ROOT="${dirs[0]}"
+          fi
+
+          echo "ROOT=$ROOT" >> "$GITHUB_ENV"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-${ANDROID_API}" \
+            "build-tools;35.0.0" \
+            "ndk;${ANDROID_NDK}"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Find Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP="$(find "$ROOT" -type f -name 'gradlew' | head -n 1 || true)"
+
+          if [ -z "$APP" ]; then
+            echo "::error::No Gradle Android project found."
+            find "$ROOT" -maxdepth 4 -type f | sort | head -200
+            exit 1
+          fi
+
+          APP_DIR="$(dirname "$APP")"
+
+          echo "Android project: $APP_DIR"
+          echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
+
+      - name: Make Gradle executable
+        run: chmod +x "$APP_DIR/gradlew"
+
+      - name: Build debug APK
+        run: |
+          cd "$APP_DIR"
+          ./gradlew assembleDebug --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ycash-android-node-debug
+          path: |
+            extracted/**/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+  package:
+    name: Package Build
+    runs-on: ubuntu-24.04
+    needs:
+      - rust-build
+      - android-build
+
+    steps:
+      - name: Download Rust artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ycash-node-rust-arm64
+          path: release/rust-arm64
+
+      - name: Download APK
+        uses: actions/download-artifact@v4
+        with:
+          name: ycash-android-node-debug
+          path: release/apk
+
+      - name: Create build information
+        shell: bash
+        run: |
+          cat > release/BUILD_INFO.txt <<EOF
+          Ycash Android Node
+          Commit: ${GITHUB_SHA}
+          Rust target: ${RUST_TARGET}
+          Android API: ${ANDROID_API}
+          Android NDK: ${ANDROID_NDK}
+          Build type: debug/test
+          EOF
+
+      - name: Upload final package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ycash-Android-Node-Build
+          path: release/
